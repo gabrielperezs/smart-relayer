@@ -8,6 +8,7 @@ import (
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/firehose"
+	"github.com/gallir/bytebufferpool"
 	"github.com/gallir/smart-relayer/lib"
 	"github.com/gallir/smart-relayer/redis"
 )
@@ -24,10 +25,21 @@ var (
 	newLine           = []byte("\n")
 )
 
-var pool = sync.Pool{
+var pool = &bytebufferpool.Pool{}
+
+var recordPool = sync.Pool{
 	New: func() interface{} {
-		return make([]byte, 0)
+		return &firehose.Record{}
 	},
+}
+
+func recordPoolGet() *firehose.Record {
+	return recordPool.Get().(*firehose.Record)
+}
+
+func recordPoolPut(r *firehose.Record) {
+	r.Data = r.Data[:0]
+	recordPool.Put(r)
 }
 
 // Client is the thread that connect to the remote redis server
@@ -35,9 +47,9 @@ type Client struct {
 	sync.Mutex
 	srv         *Server
 	mode        int
-	buff        []byte
+	buff        *bytebufferpool.ByteBuffer
 	count       int
-	batch       []*firehose.Record
+	batch       []*bytebufferpool.ByteBuffer
 	batchSize   int
 	status      int
 	finish      chan bool
@@ -89,7 +101,7 @@ func (clt *Client) listen() {
 
 	clt.status = 1
 
-	clt.buff = pool.Get().([]byte)
+	clt.buff = pool.Get()
 
 	for {
 
@@ -110,6 +122,8 @@ func (clt *Client) listen() {
 			} else {
 				// Just store the bytes
 				content = r.Bytes()
+				r.Data = nil
+				r.Raw = r.Raw[:0]
 			}
 
 			if recordSize+1 >= maxBatchSize {
@@ -126,23 +140,23 @@ func (clt *Client) listen() {
 			}
 
 			// The maximum size of a record sent to Kinesis Firehose, before base64-encoding, is 1000 KB.
-			if len(clt.buff)+recordSize+1 >= maxRecordSize || clt.count+1 >= clt.srv.config.MaxRecords {
+			if clt.buff.Len()+recordSize+1 >= maxRecordSize || clt.count+1 >= clt.srv.config.MaxRecords {
 				// Save in new record
-				clt.appendRecord(clt.buff)
-				clt.buff = pool.Get().([]byte)
+				clt.batch = append(clt.batch, clt.buff)
+				clt.buff = pool.Get()
 			}
 
-			clt.buff = append(clt.buff, content...)
-			clt.buff = append(clt.buff, newLine...)
+			clt.buff.Write(content)
+			clt.buff.Write(newLine)
 
 			clt.count++
-			clt.batchSize += len(clt.buff)
+			clt.batchSize += clt.buff.Len()
 
 		case <-clt.tick.C:
-			if time.Since(clt.lastFlushed) >= recordsTimeout && (len(clt.buff) > 0 || len(clt.batch) > 0) {
-				if len(clt.buff) > 0 {
-					clt.appendRecord(clt.buff)
-					clt.buff = pool.Get().([]byte)
+			if time.Since(clt.lastFlushed) >= recordsTimeout && (clt.buff.Len() > 0 || len(clt.batch) > 0) {
+				if clt.buff.Len() > 0 {
+					clt.batch = append(clt.batch, clt.buff)
+					clt.buff = pool.Get()
 				}
 				clt.flush()
 			}
@@ -154,16 +168,6 @@ func (clt *Client) listen() {
 	}
 }
 
-// appendRecord store the current buffer in a new record and append it to the batch
-func (clt *Client) appendRecord(buff []byte) {
-	if len(buff) <= 0 {
-		// Don't create empty records
-		return
-	}
-
-	clt.batch = append(clt.batch, &firehose.Record{Data: buff})
-}
-
 // flush build the last record if need and send the records slice to AWS Firehose
 func (clt *Client) flush() {
 	clt.lastFlushed = time.Now()
@@ -173,13 +177,21 @@ func (clt *Client) flush() {
 		return
 	}
 
-	// Send the batch to AWS Firehose
-	clt.putRecordBatch(clt.batch)
+	var batchRecords []*firehose.Record
 
 	// Put slice in the pull after sent to AWS Firehose
 	for _, r := range clt.batch {
-		r.Data = r.Data[:0]
-		pool.Put(r.Data)
+		batchRecords = append(batchRecords, recordPoolGet().SetData(r.Bytes()))
+		// Put slice buffers in the pull after sent
+		pool.Put(r)
+	}
+
+	// Send the batch to AWS Firehose
+	clt.putRecordBatch(batchRecords)
+
+	// Put slice records in the pull after sent
+	for _, r := range batchRecords {
+		recordPoolPut(r)
 	}
 
 	clt.batchSize = 0
@@ -220,8 +232,8 @@ func (clt *Client) Exit() {
 	clt.done <- true
 	<-clt.finish
 
-	if len(clt.buff) > 0 {
-		clt.appendRecord(clt.buff)
+	if clt.buff.Len() > 0 {
+		clt.batch = append(clt.batch, clt.buff)
 	}
 
 	clt.flush()

@@ -32,11 +32,11 @@ for ($c = 1; $c<=$limit; $c++) {
             );
 
             for ($sadd = 0; $sadd < 5; $sadd++) { 
-                $data["list"] = randString(10);
+                $data["list"] = randString(rand(1000,2000));
             }
             
             for ($sadd = 0; $sadd < 5; $sadd++) { 
-                $data["dict"][ randString(5) ] = randString(10);
+                $data["dict"][ randString(5) ] = randString(rand(1000,2000));
             }
 
             $json = json_encode(array('_ts'=>microtime(true), 'data'=>$data));

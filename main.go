@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log"
 	"log/syslog"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"syscall"
@@ -19,7 +21,7 @@ import (
 )
 
 const (
-	version = "6.0.7"
+	version = "6.1.0-dev"
 )
 
 var (
@@ -97,6 +99,10 @@ func startOrReload() bool {
 }
 
 func main() {
+	go func() {
+		log.Println(http.ListenAndServe("localhost:6060", nil))
+	}()
+
 	// Force a high number of file descriptoir, if possible
 	var rLimit syscall.Rlimit
 	e := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rLimit)
