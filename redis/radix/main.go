@@ -9,14 +9,13 @@ import (
 
 	"github.com/gallir/radix.improved/redis"
 	"github.com/gallir/smart-relayer/lib"
-	"github.com/gallir/smart-relayer/redis/pool"
 )
 
 // Server is the thread that listen for clients' connections
 type Server struct {
 	sync.Mutex
 	config   lib.RelayerConfig
-	pool     *pool.Pool
+	pool     *Pool
 	mode     int
 	done     chan bool
 	exiting  bool
@@ -28,7 +27,7 @@ const (
 	requestBufferSize = 1024
 	listenTimeout     = 0 * time.Second // Don't timeout on local clients
 	connectTimeout    = 5 * time.Second
-	maxIdle           = 15 * time.Second
+	maxIdle           = 120 * time.Second
 	selectCommand     = "SELECT"
 )
 
@@ -125,7 +124,7 @@ func (srv *Server) Reload(c *lib.RelayerConfig) error {
 			log.Printf("Reset redis server at port %s for target %s", srv.config.Listen, srv.config.Host())
 			srv.pool.Reset()
 		}
-		srv.pool = pool.New(c, NewClient)
+		srv.pool = NewPool(c)
 	} else {
 		log.Printf("Reload redis config at port %s for target %s", srv.config.Listen, srv.config.Host())
 		srv.pool.ReadConfig(c)
@@ -147,13 +146,8 @@ func (srv *Server) handleConnection(netCon net.Conn) {
 	defer netCon.Close()
 
 	reader := redis.NewRespReader(netCon)
-	pooled, ok := srv.pool.Get()
-	if !ok {
-		log.Println("Redis server, no clients available from pool")
-		return
-	}
-	defer srv.pool.Close(pooled)
-	client := pooled.Client
+	client := srv.pool.Get()
+	defer srv.pool.Put(client)
 	responseCh := make(chan *redis.Resp, 1)
 	defer close(responseCh)
 
@@ -186,9 +180,8 @@ func (srv *Server) handleConnection(netCon net.Conn) {
 		if srv.mode == lib.ModeSmart {
 			fastResponse, ok := commands[req.Command]
 			if ok {
-				e := client.Send(req)
+				e := client.send(req)
 				if e != nil {
-					// log.Println("Error sending", srv.config.Host(), e)
 					redis.NewResp(e).WriteTo(netCon)
 					continue
 				}
@@ -200,9 +193,8 @@ func (srv *Server) handleConnection(netCon net.Conn) {
 		// Synchronized mode
 		req.ResponseChannel = responseCh
 
-		e := client.Send(req)
+		e := client.send(req)
 		if e != nil {
-			// log.Println("Error sending", srv.config.Host(), e)
 			redis.NewResp(e).WriteTo(netCon)
 			continue
 		}
