@@ -140,7 +140,7 @@ func (clt *Client) listen() {
 			}
 
 			// The maximum size of a record sent to Kinesis Firehose, before base64-encoding, is 1000 KB.
-			if clt.buff.Len()+recordSize+1 >= maxRecordSize || clt.count+1 >= clt.srv.config.MaxRecords {
+			if !clt.srv.config.ConcatRecords || clt.buff.Len()+recordSize+1 >= maxRecordSize || clt.count+1 >= clt.srv.config.MaxRecords {
 				// Save in new record
 				clt.batch = append(clt.batch, clt.buff)
 				clt.buff = pool.Get()
